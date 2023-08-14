@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+
 //网络通信需要包含的头文件和需要加载的库文件
 #include <WinSock2.h>
 #pragma comment(lib,"WS2_32.lib")
@@ -179,7 +182,8 @@ int get_line(int nSocket, char* buff, int nSize)
 	}
 
 	buff[i] = 0;//'\n'
-	return 0;
+
+	return i;
 }
 
 //向指定的套接字，发送一个提示还没有实现的错误页面
@@ -188,9 +192,173 @@ void unimplement(int nClient)
 	//to do
 }
 
+//网页不存在
+void not_found(int nClient)
+{
+	char cBuff[1024];
+
+	//状态行：版本+空格+状态码+短语+回车换行，比如："HTTP/1.0 200 OK\r\n"
+	strcpy_s(cBuff, "HTTP/1.0 404 NOT FOUND\r\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	//Server：服务器端的软件名称+版本号
+	strcpy_s(cBuff, "Server: AbcHttpd/1.1\r\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	strcpy_s(cBuff, "Content-type:text/html; charset=utf-8\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	strcpy_s(cBuff, "\r\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	//发送404网页内容
+	sprintf(cBuff, "<html>							\
+			<title>Not Found</title>		\
+			<head>						\
+				<meta charset=\"utf - 8\">		\
+			</head>						 \
+			<body>						 \
+					<h1>404 找不到页面！</h1>		\
+					<p>页面可能走丢了...</p>	   \
+				<img src=\"NotFound.jpg\"/>		  \
+			</body>								  \
+		</html>");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+}
+
+//发送响应包的头信息
+void headers(int nClient, const char* cFileType)
+{
+	char cBuff[1024];
+
+	//状态行：版本+空格+状态码+短语+回车换行，比如："HTTP/1.0 200 OK\r\n"
+	strcpy_s(cBuff, "HTTP/1.0 200 OK\r\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	//Server：服务器端的软件名称+版本号
+	strcpy_s(cBuff, "Server: AbcHttpd/1.1\r\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	if (!stricmp(cFileType,".html"))
+	{
+		strcpy_s(cBuff, "Content-type:text/html; charset=utf-8\n");
+	}
+	else if (!stricmp(cFileType, ".jpeg") || !stricmp(cFileType, ".jpg"))
+	{
+		strcpy_s(cBuff, "Content-Type: image/jpeg\n");
+	}
+	else if (!stricmp(cFileType, ".ZIP"))
+	{
+		strcpy_s(cBuff, "Content-Type: application/zip\n");
+	}
+	else if (!stricmp(cFileType, ".pdf"))
+	{
+		strcpy_s(cBuff, "Content-Type: application/pdf\n");
+	}
+	else if (!stricmp(cFileType, ".xml"))
+	{
+		strcpy_s(cBuff, "Content-type: text/xml\n");
+	}
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+	strcpy_s(cBuff, "\r\n");
+	send(nClient, cBuff, strlen(cBuff), 0);
+
+}
+
+void cat(int nClient, FILE* resource)
+{
+	char cBuff[4096];
+	int nCount = 0;
+
+	while (1)
+	{
+		int nRet = fread(cBuff, sizeof(char), sizeof(cBuff), resource);
+		if (nRet <= 0)
+		{
+			break;
+		}
+		send(nClient, cBuff, nRet, 0);
+		nCount += nRet;
+	}
+	printf("一共发送[%d]字节给浏览器！\n", nCount);
+}
+
+//把文件从服务器发出去
+void server_file(int nClient, const char* fileName)
+{
+	int nNumberChars = 1;
+	char cBuff[1024];
+
+	//请求包的剩余数据读取完毕
+	while (nNumberChars > 0 && strcmp(cBuff, "\n"))
+	{
+		nNumberChars = get_line(nClient, cBuff, sizeof(cBuff));
+		if (strlen(cBuff) - 1 > 0)
+		{
+			PRINTF(cBuff);
+		}
+	}
+
+	FILE* resource = NULL;
+
+	const char* cFileType = strrchr(fileName, '.');
+	if (strcmp(cFileType, ".html") == 0)
+	{
+		resource = fopen(fileName, "r");
+	}
+	else
+	{
+		resource = fopen(fileName, "rb");
+	}
+	if (resource == NULL)
+	{
+		not_found(nClient);
+	}
+	else
+	{
+		//正式发送资源给浏览器
+		headers(nClient, cFileType);
+
+		//发送请求的资源信息
+		cat(nClient, resource);
+
+		printf("资源发送完毕！\n");
+
+		//输出当前时间
+		SYSTEMTIME currentTime;
+		GetSystemTime(&currentTime);
+
+		printf("当前时间: %u/%u/%u %u:%u:%u:%u %d\n",
+			currentTime.wYear, currentTime.wMonth, currentTime.wDay,
+			currentTime.wHour, currentTime.wMinute, currentTime.wSecond,
+			currentTime.wMilliseconds, currentTime.wDayOfWeek);
+	}
+	fclose(resource);
+}
+
 //处理用户请求的线程函数
 DWORD WINAPI accept_request(LPVOID arg)//LPVOID == void*  arg=>套接字
 {
+	/*数据包格式：
+	*	GET / HTTP/1.1\n
+	*	Host: 127.0.0.1:8000\n
+	*	Connection: keep-alive\n
+	*	Cache-Control: max-age=0\n
+	*	Upgrade-Insecure-Requests: 1\n
+	*	User-Agent: Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36\n
+	*	Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,* \ 
+	*	/*; q = 0.8, application / signed - exchange; v = b3; q = 0.9\n
+	*	Sec - Fetch - Site: none\n
+	*	Sec - Fetch - Mode: navigate\n
+	*	Sec - Fetch - User: ? 1\n
+	*	Sec - Fetch - Dest: document\n
+	*	Accept - Encoding: gzip, deflate, br\n
+	*	Accept - Language: zh - CN, zh; q = 0.9\n
+	*	\n
+	*/
+
 	//解析
 	char cBuff[1024];//1K
 
@@ -198,9 +366,16 @@ DWORD WINAPI accept_request(LPVOID arg)//LPVOID == void*  arg=>套接字
 
 	//读一行数据
 	int nNumberChars = get_line(nClient, cBuff, sizeof(cBuff));
-	PRINTF(cBuff);
 
-	//获取提交方法 GET POST
+	//如果在服务器打开的时候关闭浏览器strlen(cBuff)==0,会报错
+	if (strlen(cBuff) <= 0 || strlen(cBuff) >= 1024)
+	{
+		not_found(nClient);
+	}
+	PRINTF(cBuff);
+	
+
+#pragma region 获取提交方法 GET POST
 	char cMethod[255];
 	int i = 0, j = 0;
 	while (!isspace(cBuff[j]) && i < sizeof(cMethod) - 1)
@@ -217,8 +392,9 @@ DWORD WINAPI accept_request(LPVOID arg)//LPVOID == void*  arg=>套接字
 		//to do 
 		unimplement(nClient);
 	}
-
-	//解析资源文件的路径
+#pragma endregion
+	
+#pragma region 解析资源文件的路径
 	//"GET /test/abc.html HTTP/1.1\n"
 	char cURL[255];//存放请求的资源的完整路径
 	i = 0;
@@ -235,6 +411,48 @@ DWORD WINAPI accept_request(LPVOID arg)//LPVOID == void*  arg=>套接字
 	cURL[i] = 0;
 	PRINTF(cURL);
 
+	//获取资源的完整路径
+
+	//www.abc.com
+	//127.0.0.1
+	//url /
+	//htdocs/index.html
+
+	char cPath[512] = "";
+	sprintf(cPath, "htdocs%s", cURL);
+	//如果最后一个字符为'/'，则默认访问index.tml，否则直接访问指定的资源路径
+	if (cPath[strlen(cPath) - 1] == '/')
+	{
+		strcat(cPath, "index.html");
+	}
+	PRINTF(cPath);
+#pragma endregion
+
+	//判断访问的是文件还是目录
+	struct stat status;
+	int nRet = stat(cPath, &status);
+	if (nRet == -1)
+	{
+		//请求包的剩余数据读取完毕
+		while (nNumberChars > 0 && strcmp(cBuff, "\n"))
+		{
+			nNumberChars = get_line(nClient, cBuff, sizeof(cBuff));
+		}
+		not_found(nClient);
+	}
+	else
+	{
+		//使用位操作&，检查类型
+		if ((status.st_mode & S_IFMT) == S_IFDIR)//S_IFMT:File type mask
+		{
+			//如果为目录，则添加html文件
+			strcat(cPath, "/index.html");
+		}
+
+		server_file(nClient, cPath);//把文件发出去
+	}
+
+	closesocket(nClient);
 	return 0;
 }
 
